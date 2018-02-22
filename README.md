@@ -2,7 +2,7 @@ python-systemd
 ===============
 
 Python module for native access to the systemd facilities. Functionality
-is seperated into a number of modules:
+is separated into a number of modules:
 - systemd.journal supports sending of structured messages to the journal
   and reading journal files,
 - systemd.daemon wraps parts of libsystemd useful for writing daemons
@@ -25,25 +25,31 @@ On Debian/Ubuntu/Mint
 
     apt-get install python-systemd python3-systemd
 
+On openSUSE and SLE
+
+    zypper in python-systemd
+
 To build from source
 
-On Fedora 21+ with Python 2:
+On CentOS, RHEL, and Fedora with Python 2:
 
     dnf install git python-pip gcc python-devel systemd-devel
     pip install git+https://github.com/systemd/python-systemd.git#egg=systemd
 
-On Fedora 21+ with Python 3:
+On Fedora with Python 3:
 
     dnf install git python3-pip gcc python3-devel systemd-devel
     pip3 install git+https://github.com/systemd/python-systemd.git#egg=systemd
 
 On Debian or Ubuntu with Python 2:
 
-   apt-get install libsystemd-{journal,daemon,login,id128}-dev gcc python-dev
+    apt-get install libsystemd-{journal,daemon,login,id128}-dev gcc python-dev pkg-config
 
 On Debian or Ubuntu with Python 3:
 
-   apt-get install libsystemd-{journal,daemon,login,id128}-dev gcc python3-dev
+    apt-get install libsystemd-{journal,daemon,login,id128}-dev gcc python3-dev pkg-config
+
+The project is also available on pypi as `systemd-python`.
 
 Usage
 =====
@@ -75,9 +81,20 @@ Notes:
    printf-style substitution is not supported. Perform any
    substitution using Python's % operator or .format() capabilities
    first.
- * A ValueError is thrown is thrown if sd_journald_sendv() results in
-   an error. This might happen if there are no arguments or one of them
-   is invalid.
+ * A ValueError is raised if sd_journald_sendv() results in an error.
+   This might happen if there are no arguments or one of them is
+   invalid.
+
+Documentation
+=============
+
+Online documentation can be found at [freedesktop.org](https://www.freedesktop.org/software/systemd/python-systemd/)
+
+To build it locally run:
+
+    make sphinx-html
+
+Or use any other builder, see `man sphinx-build` for a list. The compiled docs will be e.g. in `docs/html`.
 
 Viewing Output
 ==============

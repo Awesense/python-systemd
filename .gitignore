@@ -1,6 +1,7 @@
 __pycache__/
 *.py[co]
 /journald/*.so
+/TAGS
 
 # Packages
 *.egg
@@ -22,6 +23,7 @@ pip-log.txt
 # Unit test / coverage reports
 .coverage
 .tox
+.cache
 
 #Translations
 *.mo
