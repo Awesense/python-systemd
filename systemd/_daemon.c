@@ -2,7 +2,7 @@
 
 /***
 
-  Copyright 2013 Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl>
+  Copyright 2013-2016 Zbigniew Jędrzejewski-Szmek <zbyszek@in.waw.pl>
 
   python-systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
@@ -31,6 +31,19 @@
 #include "systemd/sd-daemon.h"
 #include "pyutil.h"
 #include "macro.h"
+#include "util.h"
+
+#if LIBSYSTEMD_VERSION >= 214
+#  define HAVE_PID_NOTIFY
+#endif
+
+#if LIBSYSTEMD_VERSION >= 219
+#  define HAVE_PID_NOTIFY_WITH_FDS
+#endif
+
+#if LIBSYSTEMD_VERSION >= 233
+#  define HAVE_IS_SOCKET_SOCKADDR
+#endif
 
 PyDoc_STRVAR(module__doc__,
         "Python interface to the libsystemd-daemon library.\n\n"
@@ -57,37 +70,99 @@ static PyObject* booted(PyObject *self, PyObject *args) {
         return PyBool_FromLong(r);
 }
 
+static inline void PyMem_Free_intp(int **p) {
+        PyMem_Free(*p);
+}
+
 PyDoc_STRVAR(notify__doc__,
-             "notify(status, unset_environment=False) -> bool\n\n"
+             "notify(status, unset_environment=False, pid=0, fds=None) -> bool\n\n"
              "Send a message to the init system about a status change.\n"
              "Wraps sd_notify(3).");
 
 static PyObject* notify(PyObject *self, PyObject *args, PyObject *keywds) {
         int r;
         const char* msg;
-        int unset = false;
+        int unset = false, n_fds;
+        int _pid = 0;
+        pid_t pid;
+        PyObject *fds = NULL;
+        _cleanup_(PyMem_Free_intp) int *arr = NULL;
 
         static const char* const kwlist[] = {
                 "status",
                 "unset_environment",
+                "pid",
+                "fds",
                 NULL,
         };
 #if PY_MAJOR_VERSION >=3 && PY_MINOR_VERSION >= 3
-        if (!PyArg_ParseTupleAndKeywords(args, keywds, "s|p:notify",
-                                         (char**) kwlist, &msg, &unset))
+        if (!PyArg_ParseTupleAndKeywords(args, keywds, "s|piO:notify",
+                                         (char**) kwlist, &msg, &unset, &_pid, &fds))
                 return NULL;
 #else
         PyObject *obj = NULL;
-        if (!PyArg_ParseTupleAndKeywords(args, keywds, "s|O:notify",
-                                         (char**) kwlist, &msg, &obj))
+        if (!PyArg_ParseTupleAndKeywords(args, keywds, "s|OiO:notify",
+                                         (char**) kwlist, &msg, &obj, &_pid, &fds))
                 return NULL;
         if (obj != NULL)
                 unset = PyObject_IsTrue(obj);
         if (unset < 0)
                 return NULL;
 #endif
+        pid = _pid;
+        if (pid < 0 || pid != _pid) {
+                PyErr_SetString(PyExc_OverflowError, "Bad pid_t");
+                return NULL;
+        }
 
-        r = sd_notify(unset, msg);
+        if (fds != NULL) {
+                Py_ssize_t i, len;
+
+                len = PySequence_Length(fds);
+                if (len < 0)
+                        return NULL;
+
+                arr = PyMem_NEW(int, len);
+                if (!fds)
+                        return NULL;
+
+                for (i = 0; i < len; i++) {
+                        PyObject *item = PySequence_GetItem(fds, i);
+                        if (!item)
+                                return NULL;
+
+                        long value = PyLong_AsLong(item);
+                        if (PyErr_Occurred())
+                                return NULL;
+
+                        arr[i] = value;
+                        if (arr[i] != value) {
+                                PyErr_SetString(PyExc_OverflowError, "Value to large for an integer");
+                                return NULL;
+                        }
+                }
+
+                n_fds = len;
+        }
+
+        if (pid == 0 && fds == NULL)
+                r = sd_notify(unset, msg);
+        else if (fds == NULL) {
+#ifdef HAVE_PID_NOTIFY
+                r = sd_pid_notify(pid, unset, msg);
+#else
+                set_error(-ENOSYS, NULL, "Compiled without support for sd_pid_notify");
+                return NULL;
+#endif
+        } else {
+#ifdef HAVE_PID_NOTIFY_WITH_FDS
+                r = sd_pid_notify_with_fds(pid, unset, msg, arr, n_fds);
+#else
+                set_error(-ENOSYS, NULL, "Compiled without support for sd_pid_notify_with_fds");
+                return NULL;
+#endif
+        }
+
         if (set_error(r, NULL, NULL) < 0)
                 return NULL;
 
@@ -177,8 +252,8 @@ static PyObject* is_mq(PyObject *self, PyObject *args) {
         if (!PyArg_ParseTuple(args, "i|O&:_is_mq",
                               &fd, Unicode_FSConverter, &_path))
                 return NULL;
-	if (_path)
-		path = PyBytes_AsString(_path);
+        if (_path)
+                path = PyBytes_AsString(_path);
 #else
         if (!PyArg_ParseTuple(args, "i|z:_is_mq", &fd, &path))
                 return NULL;
@@ -242,6 +317,60 @@ static PyObject* is_socket_inet(PyObject *self, PyObject *args) {
         return PyBool_FromLong(r);
 }
 
+PyDoc_STRVAR(is_socket_sockaddr__doc__,
+             "_is_socket_sockaddr(fd, address, type=0, flowinfo=0, listening=-1) -> bool\n\n"
+             "Wraps sd_is_socket_inet_sockaddr(3).\n"
+#ifdef HAVE_IS_SOCKET_SOCKADDR
+             "`address` is a systemd-style numerical IPv4 or IPv6 address as used in\n"
+             "ListenStream=. A port may be included after a colon (\":\"). See\n"
+             "systemd.socket(5) for details.\n\n"
+             "Constants for `family` are defined in the socket module."
+#else
+             "NOT SUPPORTED: compiled without support sd_socket_sockaddr"
+#endif
+);
+
+static PyObject* is_socket_sockaddr(PyObject *self, PyObject *args) {
+        int r;
+        int fd, type = 0, flowinfo = 0, listening = -1;
+        const char *address;
+        union sockaddr_union addr = {};
+        unsigned addr_len;
+
+        if (!PyArg_ParseTuple(args, "is|iii:_is_socket_sockaddr",
+                              &fd,
+                              &address,
+                              &type,
+                              &flowinfo,
+                              &listening))
+                return NULL;
+
+        r = parse_sockaddr(address, &addr, &addr_len);
+        if (r < 0) {
+                set_error(r, NULL, "Cannot parse address");
+                return NULL;
+        }
+
+        if (flowinfo != 0) {
+                if (addr.sa.sa_family != AF_INET6) {
+                        set_error(-EINVAL, NULL, "flowinfo is only applicable to IPv6 addresses");
+                        return NULL;
+                }
+
+                addr.in6.sin6_flowinfo = flowinfo;
+        }
+
+#ifdef HAVE_IS_SOCKET_SOCKADDR
+        r = sd_is_socket_sockaddr(fd, type, &addr.sa, addr_len, listening);
+        if (set_error(r, NULL, NULL) < 0)
+                return NULL;
+
+        return PyBool_FromLong(r);
+#else
+        set_error(-ENOSYS, NULL, "Compiled without support for sd_is_socket_sockaddr");
+        return NULL;
+#endif
+}
 
 PyDoc_STRVAR(is_socket_unix__doc__,
              "_is_socket_unix(fd, type, listening, path) -> bool\n\n"
@@ -286,8 +415,9 @@ static PyMethodDef methods[] = {
         { "_is_mq", is_mq, METH_VARARGS, is_mq__doc__},
         { "_is_socket", is_socket, METH_VARARGS, is_socket__doc__},
         { "_is_socket_inet", is_socket_inet, METH_VARARGS, is_socket_inet__doc__},
+        { "_is_socket_sockaddr", is_socket_sockaddr, METH_VARARGS, is_socket_sockaddr__doc__},
         { "_is_socket_unix", is_socket_unix, METH_VARARGS, is_socket_unix__doc__},
-        { NULL, NULL, 0, NULL }        /* Sentinel */
+        {}        /* Sentinel */
 };
 
 #if PY_MAJOR_VERSION < 3
